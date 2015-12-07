@@ -1,0 +1,506 @@
+---
+title: "Capstone"
+author: "Li Sun"
+date: "October 18, 2015"
+output: html_document
+---
+
+Data is get from coursera website capstone coursera page. 
+
+Read in Data, data are in json format. There are 5 separate datasets are business, checkin, tip, review, and user, contain different information of reviews on yelp 
+
+```{r}
+#load jsonlite package
+library(jsonlite)
+library(tm)
+library(ngram)
+library(stringr)
+library(ggplot2)
+library(wordcloud)
+library(RColorBrewer)
+library(gplots)
+
+#read business file
+file.path = file.choose()
+business<-stream_in(file(file.path))
+saveRDS(business, "business.rds")
+
+#read checkin file
+file.path = file.choose()
+checkin<-stream_in(file(file.path))
+saveRDS(checkin, "checkin.rds")
+
+#read review file
+file.path = file.choose()
+review<-stream_in(file(file.path))
+saveRDS(review, "review.rds")
+
+#read tip file
+file.path = file.choose()
+tip<-stream_in(file(file.path))
+saveRDS(tip, "tip.rds")
+
+#read user file
+file.path = file.choose()
+business<-stream_in(file(file.path))
+saveRDS(user, "user.rds")
+
+#Read files back
+business <- readRDS("business.rds")
+#checkin <- readRDS("checkin.rds")
+review <- readRDS("review.rds")
+#tip<- readRDS("tip.rds")
+user <- readRDS("user.rds")
+```
+
+#EDA
+flat all data frames
+```{r}
+fbusi <- flatten(business)
+#fchk <- flatten(checkin)
+frev <- flatten(review)
+#ftip <- flatten(tip)
+fusr <- flatten(user)
+```
+##Subsetting and merging
+```{r}
+#for business dataset
+#how many different type of services
+unique(unlist(fbusi$categories))
+mycat <- c("Restaurants")
+#We don't need full_address(2), neighborhoods(8), longitude(9), state(10), latitude(12), hours(14:27), "attributes.By Appointment Only"(28), [57] "attributes.Accepts Insurance" , [86]"attributes.Hair Types Specialized In.coloring" [87] "attributes.Hair Types Specialized In.africanamerican" "attributes.Hair Types Specialized In.curly" [89] "attributes.Hair Types Specialized In.perms"           "attributes.Hair Types Specialized In.kids"  [91] "attributes.Hair Types Specialized In.extensions"      "attributes.Hair Types Specialized In.asian" [93] "attributes.Hair Types Specialized In.straightperms"
+#We need "open" = TRUE, business category falls into mycat, and not "NA" on attributes.wife
+names(fbusi)[46] <- "attributes.wifi"
+geo <- fbusi[,c(1,2,5,7,8,9,10,12)]
+rowidx <- fbusi$open & sapply(fbusi$categories, function(x) length(intersect(mycat, x))!=0) & !is.na(fbusi$attributes.wifi)
+fbusi <- fbusi[rowidx, -c(2,8:10, 12, 14:28, 57, 86:93)]
+saveRDS(fbusi, "fbusi.rds")
+#Checkin data not used
+#tip data not used
+#merge business and review tables
+df <- merge(frev, fbusi, by="business_id")
+df <- df[,-c(7,17)]
+names(df)[4] <- "stars"
+names(df)[15] <- "busi_stars"
+#merge df and user tables
+df0 <- merge(df, fusr, by="user_id", all.x = TRUE)
+```
+##Text quantification
+Let's do some text processing
+```{r}
+#if talked about 'wife' or 'internet', in a positive way or negative way
+#Subset out the reviews with wifi or internet
+
+#Function to extract a sentence containing certain words
+findSentence <- function(oristr, word){
+  x <- strsplit(oristr, split = "[\\.\\!\\?\n]")[[1]]
+  idx <- grep(word, x, ignore.case = T)
+  return(toString(x[idx]))
+}
+
+df0$wifi_sen <- rep("", nrow(df0))
+wifiidx <- grep("wi-?fi", df0$text, ignore.case=T) 
+for(i in wifiidx){
+  df0$wifi_sen[i] <- c(findSentence(df0$text[i], "wi-?fi"))
+}
+internetidx <- grep("internet", df0$text, ignore.case = T)
+for(i in internetidx){
+  if(df0$wifi_sen[i]==""){df0$wifi_sen[i] <- findSentence(df0$text[i], "internet")}
+  else{df0$wifi_sen[i] <- paste(df0$wifi_sen[i], findSentence(df0$text[i], "internet"), sep=".")}
+}
+idx1 <- unique(c(wifiidx, internetidx))
+
+# sum(wifiidx & wi_fiidx & internetidx)
+# 
+# idx_wifi <- wifiidx | internetidx
+# dfwifi <- df0[idx_wifi,]
+# dfwifi$text_wifi 
+
+#Convert all letters to lower case
+#remove stopwords
+#remove puctuation
+#stem words
+myStopwords <- c(stopwords('english'), "if")
+positive_words <- readLines("http://www.idiap.ch/~apbelis/hlt-course/positive-words.txt")[-c(1:35)]
+negtive_words <- readLines("http://r.chrisrooney.co.uk/presentation/data/negative-words.txt")[-c(1:35)]
+
+#Function to count positive words
+pos_count <- function(char, pos = positive_words){
+  sum(strsplit(char, split=" ")[[1]] %in% pos)
+}
+#Function to count negative words
+neg_count <- function(char, neg = negtive_words){
+  sum(strsplit(char, split=" ")[[1]] %in% neg)
+}
+#dict <- character()
+
+# Extract 3 things from each reviews:
+# 1. Total words
+# 2. Positive words
+# 3. Negative words
+df0$text2 <- rep("", nrow(df0))
+df0$token_num <- rep(0, nrow(df0))
+df0$pos_num <- rep(0, nrow(df0))
+df0$neg_num <- rep(0, nrow(df0))
+for(i in 1:nrow(df0)){
+  txt <- df0$text[i]
+  txt <- tolower(txt)
+  txt <- removeWords(txt, myStopwords)
+  txt <- removePunctuation(txt)
+  txt <- removeNumbers(txt)
+  #remove extra spaces
+  txt <- stripWhitespace(txt)
+  if(substr(txt,1,1)==" "){txt <- gsub("^ ", "", txt)}
+  # stem words
+  df0$text2[i] <- txt
+  # df0$stemedtext[i] <- strsplit(txt, split = " ")[[1]]
+  # dict <- unique(c(dict, strsplit(txt, split = " ")[[1]]))
+  # stemWords <- stemDocument(oriWords)
+  # stemedtext[[i]] <- stemWords
+  df0$token_num[i] <- length(strsplit(txt, split=" ")[[1]])
+  df0$pos_num[i] <- pos_count(txt)
+  df0$neg_num[i] <- neg_count(txt)
+}
+saveRDS(df0, "yelp_tm.rds")
+```
+
+##What pepole say about wifi?
+We subset all rows where people mentioned about "wifi" or "internet", it will be interesting to see what people say about wifi
+```{r}
+wifidf <- df0[df0$wifi_sen!="",]
+wifi_text <- wifidf$wifi_sen
+dict<-as.character()
+for(i in seq(wifi_text)){
+  wifi_text[i] <- gsub("wi-?fi", "wifi", wifi_text[i], ignore.case = T)
+  wifi_text[i] <- gsub("internet", "wifi", wifi_text[i], ignore.case = T)
+  wifi_text[i] <- tolower(wifi_text[i])
+  wifi_text[i] <- removeWords(wifi_text[i], myStopwords)
+  wifi_text[i] <- removePunctuation(wifi_text[i])
+  wifi_text[i] <- removeNumbers(wifi_text[i])
+  wifi_text[i] <- stripWhitespace(wifi_text[i])
+  if(substr(wifi_text[i],1,1)==" "){wifi_text[i] <- gsub("^ ", "", wifi_text[i])}
+  dict <- c(dict, strsplit(wifi_text[i], split = " ")[[1]])
+}
+#Stem words
+stem_wifi_text <- list()
+for(i in 1:length(wifi_text)){
+  oriwords <- strsplit(wifi_text[i], split=" ")[[1]]
+  stemedwords <- stemDocument(oriwords)
+  newwords <- stemCompletion(stemedwords, dictionary = dict, type = "prevalent")
+  stem_wifi_text[[i]] <- newwords
+}
+
+saveRDS(stem_wifi_text, "stem_wifi_text.rds")
+#Find 2-grams
+find_2_gram <- function(vec){
+  v1 <- vec[1:length(vec)-2+1]
+  v2 <- vec[2:length(vec)]
+  g2<-paste(v1, v2)
+  g2
+}
+gram2<-list()
+for(i in seq(stem_wifi_text)){
+  gram2[[i]] <- find_2_gram(stem_wifi_text[[i]])
+}
+#build word could from input of a list of documents
+mywc <- function(doclist){
+  freqdf<-as.data.frame(table(unlist(doclist)),stringsAsFactors=F) 
+  wordcloud(freqdf$Var1, freqdf$Freq, max.words=66, colors=brewer.pal(8, "Dark2"))
+}
+mywc(stem_wifi_text)
+```
+
+## Construct new variables will be used in future analysis from text mining
+1. number of reviews per business
+2. average review stars
+2. postive words
+3. negtive words
+4. token numbers
+5. sentiment = (positive words - negtive words)/token numbers 
+6. number of reviews talking about wifi
+```{r}
+fbusi <- readRDS("fbusi.rds")
+#number of reviews
+nrev <- as.data.frame(table(df0$business_id), stringsAsFactors = F)
+names(nrev) <- c("business_id", "nrev")
+busi2 <- merge(fbusi, nrev, by="business_id")
+#average review stars
+ave_star <- tapply(df0$stars, df0$business_id, mean)
+ave_stardf <- data.frame(business_id=names(ave_star), ave_star=ave_star)
+busi2 <- merge(busi2, ave_stardf, by="business_id")
+#average positive words
+ave_pos <- tapply(df0$pos_num, df0$business_id, mean)
+ave_pos <- data.frame(business_id=names(ave_pos), ave_pos=ave_pos)
+busi2 <- merge(busi2, ave_pos, by="business_id")
+#average negative words
+ave_neg <- tapply(df0$neg_num, df0$business_id, mean)
+ave_neg <- data.frame(business_id=names(ave_neg), ave_neg=ave_neg)
+busi2 <- merge(busi2, ave_neg, by="business_id")
+#average token numbers
+ave_tok <- tapply(df0$token_num, df0$business_id, mean)
+ave_tok <- data.frame(business_id=names(ave_tok), ave_tok=ave_tok)
+busi2 <- merge(busi2, ave_tok, by="business_id")
+#average number of reviews mentioned wifi
+nrev_wifi <- as.data.frame(table(wifidf$business_id), stringsAsFactors = F)
+names(nrev_wifi) <- c("business_id", "nrev_wifi")
+busi2 <- merge(busi2, nrev_wifi, by="business_id", all.x=T)
+busi2$nrev_wifi[is.na(busi2$nrev_wifi)] <- 0
+#sentiment
+busi2$sentiment <- (busi2$ave_pos - busi2$ave_neg)/busi2$ave_tok
+```
+##Convert the categories to cate_matrix
+We want to change categories of all rows into a form easy to be analyzed
+```{r}
+#How many unique categories are there?
+for(i in 1:nrow(fbusi)){
+  fbusi$categories[[i]] <- gsub("[()]", "",  fbusi$categories[[i]])
+}
+categ <- fbusi$categories
+uniq_categ <- unique(unlist(sapply(categ, unlist)))
+#uniq_categ
+for(i in seq(categ)){
+  categ[i] <- toString(unlist(categ[i]))
+}
+categ_df <- as.numeric(grepl(uniq_categ[1], categ))
+for(i in 2:length(uniq_categ)){
+  tempcol <- as.numeric(grepl(uniq_categ[i], categ))
+  categ_df <- cbind(categ_df, tempcol)
+}
+colnames(categ_df) <- uniq_categ
+categ_df <- as.data.frame(categ_df)
+par(mar=c(12,4,4,3))
+barplot(sort(sapply(categ_df, sum), decreasing = T))
+temp=rep(0, nrow(categ_df))
+i=1
+z<-numeric()
+temp <- categ_df[,1]
+while(sum(temp==0)){
+  i = i+1
+  z <- c(z,sum(temp==0))
+  temp<-temp + categ_df[,i]
+  if(i > 255){break; print("unsuccess")}
+}
+categ_df <- cbind(fbusi$business_id, categ_df)
+names(categ_df)[1] <- "business_id"
+#merge to busi2
+busi3 <- merge(busi2, categ_df, by="business_id", all.x=T)
+
+saveRDS(busi3, "busi3.rds")
+```
+
+##Missing values
+```{r}
+busi3 <- readRDS("busi3.rds")                
+#convert class array to numeric
+arrayidx <- which(sapply(busi3, class)=="array")
+for(i in arrayidx){
+  busi3[,i] <- as.numeric(busi3[,i])
+}
+#remove original categories var, and change credit cards var to logic
+busi3 <- busi3[,-3]
+var9<-unlist(as.character(busi3[,9]))
+var9[var9=="TRUE"] <- 1
+var9[var9=="FALSE"] <- 0
+var9[var9=="NULL"] <- NA
+busi3[,9] <- as.numeric(var9)
+
+sparcity <- sapply(busi3, function(x){sum(is.na(x))/length(x)})
+par(mar=c(14,4,4,2))
+barplot(sort(sparcity, decreasing = T)[1:50], las=2, cex.names=0.8, ylab="sparsicity")
+abline(h=0.1,col=4,lty=2)
+
+#remove cols with sparcity > 0.4
+busi4 <- busi3[,sparcity < 0.1]
+#seperate identity columns: business_id, name
+busi_id_df <- busi4[,c(1,5)]
+busi4 <- busi4[,-c(1,5)]
+
+sum(complete.cases(busi4))
+# maintain only completcases
+busi4 <- busi4[complete.cases(busi4),]
+
+#change all cols to classes as factors or numeric, easy to analyze
+unique(sapply(busi4, class)[1:50])
+busi4$city <- as.factor(busi4$city)
+busi4$attributes.Alcohol <- as.factor(busi4$attributes.Alcohol)
+busi4$`attributes.Noise Level` <- as.factor(busi4$`attributes.Noise Level`)
+busi4$attributes.Attire <- as.factor(busi4$attributes.Attire)
+busi4$attributes.wifi <- as.factor(busi4$attributes.wifi)
+
+#2 variables contain only one unique value, so we will get rid of them
+busi4 <- busi4[, -c(1, 5, 51)]
+div=numeric()
+for(i in 1:ncol(busi4)){
+  div<- c(div, sort(table(busi4[,i]), decreasing=T)[1]/nrow(busi4))
+}
+x <- seq(0.95,1,by=0.001)
+y <- numeric()
+for(i in seq_along(x)){
+  y <- c(y, sum(div < x[i]))
+}
+plot(x, y)
+df <- busi4[,div <0.99]
+
+saveRDS(df, "df_for_EDA.rds")
+
+```
+
+##EDA
+First we found the cities var contains too many values, and not distributed uniformly. So in order to increase the efficincy of regression, lower the number of dummy variables in the final model, we will group some of the citis 
+```{r}
+df <- readRDS("df_for_EDA.rds")
+#let's try to use geographical closeness
+# city <- unique(df$city)
+# tapply()
+city<-names(sort(table(df$city), decreasing = T)[1:4])
+# we will leave first 5 cities and combine all left as "others"
+oricity <- as.character(df$city)
+for(i in 1:nrow(df)){
+  if(oricity[i] %in% city){next}
+  else{oricity[i]<-"others"}
+}
+df$city <- as.factor(oricity)
+df$attributes.wifi <- relevel(df$attributes.wifi, "no")
+```
+We still have too many variables specifying types of restuarants. Some of the types are rare, with less occurance, that would be of our less interest. So I want to cut the type of restuarants down to several majors types. The standard of maintainning certain types depends on occurance and also we want to cover almost all the business in list.
+```{r}
+occr<- sort(apply(df[,43:78], 2, sum), decreasing = T)
+covr <- numeric()
+temp <- rep(0, nrow(df))
+for(i in 1:length(occr)){
+  temp <- temp + df[,names(occr)[i]]
+  covr <- c(covr, sum(temp!=0)/nrow(df))
+}
+qplot(x=1:length(occr), y=covr, size=occr, colour=occr, geom="point", xlab="number of types", ylab="coverage of all observations")
+```
+Based on this figuer, we will choose first 13 types which cover `r covr[13]` of all observations
+```{r}
+df1 <- cbind(df[, 1:42], df[, names(occr)[1:13]])
+```
+
+Third, check the correlations
+```{r}
+corm <- cor(as.matrix(df1[,-c(1, 9, 10,12, 17)]))
+heatmap.2(corm)
+```
+This tell us:
+1. stars which is from business table are highly correlated to average stars we want to analyze, if we include this in the model, we will get model with high R square but can provide no information about what people really like. So I will exclude this business star from our model
+2. two variables are almost the same, "review_count", and "nrev", they are talking about the same thing, so I will remove "review count" . Similarly, "nightlife" and "bars" overlap significantly, so remove "nightlife"
+```{r}
+df2 <- df1[, -c(2,3, 47)]
+```
+
+Finally, lets look at some numeric variables distributions
+```{r}
+par(mfrow=c(2,2))
+hist(df2$ave_star)
+hist(df2$ave_pos)
+hist(df2$ave_neg)
+hist(df2$ave_tok)
+hist(log(df2$nrev_wifi[df2$nrev_wifi!=0]))
+hist(df2$sentiment)
+```
+Data are not very skewed except wifi review counts. Just leave them like this
+
+# Exploratory modeling
+## full model
+
+## outliers
+
+## diaganostics
+
+# Model selection
+## lasso
+
+## interacting term
+interact with restuarants' type
+
+
+
+
+
+# Metadata
+Notes on the Dataset
+Each file is composed of a single object type, one json-object per-line.
+Take a look at some examples to get you started: https://github.com/Yelp/dataset-examples.
+
+business
+{
+    'type': 'business',
+    'business_id': (encrypted business id),
+    'name': (business name),
+    'neighborhoods': [(hood names)],
+    'full_address': (localized address),
+    'city': (city),
+    'state': (state),
+    'latitude': latitude,
+    'longitude': longitude,
+    'stars': (star rating, rounded to half-stars),
+    'review_count': review count,
+    'categories': [(localized category names)]
+    'open': True / False (corresponds to closed, not business hours),
+    'hours': {
+        (day_of_week): {
+            'open': (HH:MM),
+            'close': (HH:MM)
+        },
+        ...
+    },
+    'attributes': {
+        (attribute_name): (attribute_value),
+        ...
+    },
+}
+review
+{
+    'type': 'review',
+    'business_id': (encrypted business id),
+    'user_id': (encrypted user id),
+    'stars': (star rating, rounded to half-stars),
+    'text': (review text),
+    'date': (date, formatted like '2012-03-14'),
+    'votes': {(vote type): (count)},
+}
+user
+{
+    'type': 'user',
+    'user_id': (encrypted user id),
+    'name': (first name),
+    'review_count': (review count),
+    'average_stars': (floating point average, like 4.31),
+    'votes': {(vote type): (count)},
+    'friends': [(friend user_ids)],
+    'elite': [(years_elite)],
+    'yelping_since': (date, formatted like '2012-03'),
+    'compliments': {
+        (compliment_type): (num_compliments_of_this_type),
+        ...
+    },
+    'fans': (num_fans),
+}
+check-in
+{
+    'type': 'checkin',
+    'business_id': (encrypted business id),
+    'checkin_info': {
+        '0-0': (number of checkins from 00:00 to 01:00 on all Sundays),
+        '1-0': (number of checkins from 01:00 to 02:00 on all Sundays),
+        ...
+        '14-4': (number of checkins from 14:00 to 15:00 on all Thursdays),
+        ...
+        '23-6': (number of checkins from 23:00 to 00:00 on all Saturdays)
+    }, # if there was no checkin for a hour-day block it will not be in the dict
+}
+tip
+{
+    'type': 'tip',
+    'text': (tip text),
+    'business_id': (encrypted business id),
+    'user_id': (encrypted user id),
+    'date': (date, formatted like '2012-03-14'),
+    'likes': (count),
+}
+
+
+Reference
+Liu Bing UIC sentiment analysis

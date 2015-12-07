@@ -1,0 +1,196 @@
+---
+title: "capstone part 2----WiFi matters?"
+author: "Li Sun"
+date: "November 21, 2015"
+output: html_document
+---
+
+
+In this part, I am trying to use small portion of the data whose review contains wifi or internet, that is using the data frame I made "wifidf", to do regression on average stars the business got. By using this model, we are assuming we can separate people's feeling about wifi and all other things by exploring the review text.
+
+#Load nessesary packages and data sets
+```{r}
+library(dplyr)
+library(ggplot2)
+library(wordcloud)
+#library(RColorBrewer)
+
+
+wifidf <- readRDS("wifidf.rds")
+#fbusi <- readRDS()
+stem_wifi_text <- readRDS("stem_wifi_text.rds")
+stem_wifi_text[1]
+
+```
+# Text mining
+```{r}
+positive_words <- readLines("http://www.idiap.ch/~apbelis/hlt-course/positive-words.txt")[-c(1:35)]
+negtive_words <- readLines("http://r.chrisrooney.co.uk/presentation/data/negative-words.txt")[-c(1:35)]
+
+#Function to count positive words
+pos_count <- function(char, pos = c(positive_words, "plus")){
+  sum(tolower(strsplit(char, split=" ")[[1]]) %in% pos)
+}
+#Function to count negative words
+neg_count <- function(char, neg = c(negtive_words)){
+  sum(tolower(strsplit(char, split=" ")[[1]]) %in% neg)
+}
+
+# for(i in 1:nrow(wifidf)){
+#   wifidf$npos[i] <- pos_count(wifidf$wifi_sen[i])
+#   wifidf$nneg[i] <- neg_count(wifidf$wifi_sen[i])
+#   wifidf$ntok[i] <- length(stem_wifi_text[[i]])
+# }
+
+for(i in 1:length(stem_wifi_text)){
+  wifidf$npos[i] <- pos_count(paste(stem_wifi_text[[i]], collapse = " "))
+  wifidf$nneg[i] <- neg_count(paste(stem_wifi_text[[i]], collapse = " "))
+  wifidf$ntok[i] <- length(stem_wifi_text[[i]])
+}
+
+wifidf$sentw <- (wifidf$npos - wifidf$nneg)/wifidf$ntok
+hist(wifidf$sentw, breaks = 100)
+
+#png(file="13.png",width=2500,height=1700,res=350)
+ggplot(wifidf, aes(attributes.wifi, sentw))+geom_boxplot(fill="light blue") + labs(x="WIFI status provided by yelp", y="sentiment about wifi")
+#qplot(wifidf$sentw ~ wifidf$attributes.wifi, xlab="WIFI status provided by yelp", ylab ="sentiment about wifi")
+#dev.off()
+
+# nosent <- filter(wifidf[,-5], sentw==0)
+# nosent$wifi_sen[1:10]
+
+# What are people talking about in weird region
+filter(wifidf[,-5], sentw < -0.3, attributes.wifi == "free")$wifi_sen
+filter(wifidf[,-5], sentw > 0.5, attributes.wifi == "no")$wifi_sen
+```
+
+
+```{r}
+#word cloud
+mywc <- function(doclist){
+  freqdf<-as.data.frame(table(unlist(doclist)),stringsAsFactors=F) 
+  wordcloud(freqdf$Var1, freqdf$Freq, max.words=50, colors=brewer.pal(8, "Dark2"))
+}
+
+freep <- filter(wifidf[,-5], sentw > 0, attributes.wifi == "free")$wifi_sen
+freen <- filter(wifidf[,-5], sentw < 0, attributes.wifi == "free")$wifi_sen
+paidp <- filter(wifidf[,-5], sentw > 0, attributes.wifi == "paid")$wifi_sen
+paidn <- filter(wifidf[,-5], sentw < 0, attributes.wifi == "paid")$wifi_sen
+nop <- filter(wifidf[,-5], sentw > 0, attributes.wifi == "no")$wifi_sen
+non <- filter(wifidf[,-5], sentw < 0, attributes.wifi == "no")$wifi_sen
+
+
+
+wordcloud(freep, max.words = 50, colors = brewer.pal(8,"Dark2"))
+wordcloud(freen, max.words = 50, colors = brewer.pal(8,"Dark2"))
+wordcloud(paidp, max.words = 50, colors = brewer.pal(8,"Dark2"))
+wordcloud(paidn, max.words = 100, colors = brewer.pal(8,"Dark2"))
+wordcloud(nop, max.words = 50, colors = brewer.pal(8,"Dark2"))
+wordcloud(non, max.words = 50, colors = brewer.pal(8,"Dark2"))
+
+
+```
+
+
+```{r}
+df0<-readRDS("yelp_tm.rds")
+wifidf2 <- merge(wifidf, df0, by = "review_id")
+wifidf2$num
+
+wifidf$pos_num <- wifidf$pos_num - wifidf$npos
+wifidf$neg_num <- wifidf$neg_num - wifidf$nneg
+wifidf$token_num <- wifidf$token_num - wifidf$ntok
+wifidf$sentiment <- (wifidf$pos_num - wifidf$neg_num)/wifidf$token_num
+
+boxplot(wifidf$sentw~wifidf$attributes.wifi)
+plot(x=wifidf$sentiment, y=wifidf$stars)
+```
+
+
+#Create new variables for regression on reviews
+```{r}
+wifidf3 <- wifidf[,c(2:6, 11,12,16:83, 106:114)]
+wifidf3<-mutate(wifidf3, token_num = token_num - ntok, pos_num = pos_num - npos, neg_num=neg_num-nneg)
+wifidf3 <- mutate(wifidf3, sentiment = (pos_num - neg_num)/token_num)
+wifidf3$sentiment[wifidf3$sentiment > 1000 | wifidf3$sentiment < -1000 | is.na(wifidf3$sentiment)] <- rep(0, 36)
+sparcity <- sapply(wifidf3, function(x){sum(is.na(x))/length(x)})
+wifidf4 <- wifidf3[,sparcity < 0.05]
+# maintain only completcases
+wifidf4 <- wifidf4[,-4]
+
+#citi
+city<-names(sort(table(wifidf4$city), decreasing = T)[1:4])
+# we will leave first 5 cities and combine all left as "others"
+oricity <- as.character(wifidf4$city)
+for(i in 1:nrow(wifidf4)){
+  if(oricity[i] %in% city){next}
+  else{oricity[i]<-"others"}
+}
+wifidf4$city <- as.factor(oricity)
+
+
+#categories
+#How many unique categories are there?
+uniq_categ <- unique(unlist(wifidf4$categories))
+categM <- (uniq_categ %in% wifidf4$categories[[1]]) *1
+for(i in 2:nrow(wifidf4)){
+  categM <- rbind(categM, (uniq_categ %in% wifidf4$categories[[i]]) *1)
+}
+colnames(categM) <- uniq_categ
+categM <- categM[,-2]
+rownames(categM) <- NULL
+wifidf4 <- cbind(wifidf4, categM)
+
+```
+
+#Change variable classes
+```{r}
+sapply(wifidf4, class)
+wifidf4$`attributes.Accepts Credit Cards`[sapply(wifidf4$`attributes.Accepts Credit Cards`, length) == 0] <- as.list(rep(999,10))
+wifidf4$`attributes.Accepts Credit Cards` <- unlist(wifidf4$`attributes.Accepts Credit Cards`)
+wifidf4$`attributes.Accepts Credit Cards`[wifidf4$`attributes.Accepts Credit Cards` > 900] <- NA
+wifidf4$attributes.Alcohol <- as.factor(wifidf4$attributes.Alcohol)
+wifidf4$`attributes.Noise Level` <- as.factor(wifidf4$`attributes.Noise Level`)
+wifidf4$attributes.Attire <- as.factor(wifidf4$attributes.Attire)
+wifidf4$attributes.wifi <- as.factor(wifidf4$attributes.wifi)
+
+saveRDS(wifidf4, "wifidf4.rds")
+
+wifidf5 <- wifidf4[, -c(1,2,4,5,40,41)]
+#Maintain only complete cases
+wifidf5 <- wifidf5[complete.cases(wifidf5),]
+
+```
+
+#Modeling on individual reviews
+```{r}
+#Remove highly correlated variables
+wifidf6 <- wifidf5[,-c(36:41)]
+f <- lm(stars~., data=wifidf6)
+summary(f)
+
+#Model selection by backwards
+fs <- step (f, direction="backward")
+summary(fs)
+```
+
+
+#Modeling by weighted regression on only business
+```{r}
+wifidf7 <- mutate(group_by(wifidf4, business_id), ave_star = mean(stars), ave_sent = mean(sentiment), ave_sentw = mean(sentw), nrev = n())
+
+wifidf7 <- wifidf7[,-c(2,3,4,5,40:49)]
+wifidf7 <- wifidf7[complete.cases(wifidf7),]
+# unibusi_id<- unique(wifidf7$business_id)
+# xdf <- data.frame(business_id=unibusi_id, extra = rep(0, length(unibusi_id)))
+# wifidf8 <- merge(xdf, wifidf7[,1:2])
+wifidf8 <- wifidf7[!duplicated(wifidf7), ]
+wifidf8 <- wifidf8[, -1]
+
+f2 <- lm(ave_star~., data=wifidf8, weights = sqrt(nrev))
+summary(f2)
+f21 <- lm(ave_star~ave_sent + ave_sentw, data=wifidf8, weights = sqrt(nrev))
+summary(f21)
+f22 <- step(f21, scope = list(lower=f21, upper=f2), direction="forward", steps=50)
+```
+

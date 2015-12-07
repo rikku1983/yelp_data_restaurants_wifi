@@ -1,0 +1,589 @@
+---
+title: "STAT 5371 final project----WiFi matters?"
+author: "Li Sun, Yang Cai, Hong Li"
+date: "November 19, 2015"
+output: pdf_document
+---
+# Introduction:
+I tried to find out, should restaurants' owners provide wifi (free or paid) to customers to make them feel better. Part I we finished converting 3 json files into a single data frame containing most relevant information. 
+
+# Methods and Data:
+Data source are from 'http://www.yelp.com/dataset_challenge'. Data comes in json format, and there are 5 files: user, business, checkin, tip, and reviews. To answer my specific question: 'Does wifi access really helps improve customers' experience in restuarants?' I choose only three data sets from these five, user, business, and reviews. And I used regression method to study effects of different variables on response, stars. I want to see if free wifi can have positive effects to stars of that business or is just irrelevant, in a good model considering all relevant variables. ]
+Preliminary data process:
+  1. Read in Json data
+  2. Clean data and merge data sets
+  3. get rid of irrelevant infomation like geographic variables
+These processes resulted in a single data frame "busi3".
+
+## First load needed packages and read in busi3 data frame.
+
+```{r, echo=FALSE, message=FALSE}
+# library(jsonlite)
+# library(tm)
+# library(ngram)
+# library(stringr)
+library(dplyr)
+library(knitr)
+library(ggplot2)
+library(wordcloud)
+# library(RColorBrewer)
+library(gplots)
+library(car)
+library(lars)
+library(glmnet)
+library(gridExtra)
+busi3 <- readRDS("busi3.rds")
+```
+
+## 1. Missing values and data types
+
+Next thing is get rid of missing values. I didnt impute missing values in this case because most of the missingness occur in factor like variables, which could not to be imputed easily. Also some of the columns are in data types which are not good for later analysis like "array", "character". We will convert them to "numeric" and "factor". Identity columns are separated to a new data frame "busi id df". Finally, we also remove those variables with very low variance, which means over 99% of all observations of those columns are unique value. Because the coeficients of those variables are going to be very large.
+
+```{r, echo=FALSE, cache= TRUE, fig.align='center', fig.width=6.5, fig.height=3, fig.show='hold'}
+#convert class array to numeric
+arrayidx <- which(sapply(busi3, class)=="array")
+for(i in arrayidx){
+  busi3[,i] <- as.numeric(busi3[,i])
+}
+#remove original categories var, and change credit cards var to logic
+busi3 <- busi3[,-3]
+var9<-unlist(as.character(busi3[,9]))
+var9[var9=="TRUE"] <- 1
+var9[var9=="FALSE"] <- 0
+var9[var9=="NULL"] <- NA
+busi3[,9] <- as.numeric(var9)
+#Check sparcity of columns 
+sparcity <- sapply(busi3, function(x){sum(is.na(x))/length(x)})
+
+# remove cols with sparcity > 0.1
+busi4 <- busi3[,sparcity < 0.1]
+#seperate identity columns: business_id, name
+busi_id_df <- busi4[,c(1,5)]
+busi4 <- busi4[,-c(1,5)]
+# sum(complete.cases(busi4))
+# maintain only completcases
+busi4 <- busi4[complete.cases(busi4),]
+busi_id_df <- busi_id_df[complete.cases(busi4),]
+# saveRDS(busi_id_df, "busi_id_df.rds")
+# change all cols to classes as factors or numeric, easy to analyze
+# unique(sapply(busi4, class)[1:50])
+busi4$city <- as.factor(busi4$city)
+busi4$attributes.Alcohol <- as.factor(busi4$attributes.Alcohol)
+busi4$`attributes.Noise Level` <- as.factor(busi4$`attributes.Noise Level`)
+busi4$attributes.Attire <- as.factor(busi4$attributes.Attire)
+busi4$attributes.wifi <- as.factor(busi4$attributes.wifi)
+#2 variables contain only one unique value, so we will get rid of them
+busi4 <- busi4[, -c(1, 5, 51)]
+div=numeric()
+for(i in 1:ncol(busi4)){
+  div<- c(div, sort(table(busi4[,i]), decreasing=T)[1]/nrow(busi4))
+}
+x <- seq(0.95,1,by=0.001)
+y <- numeric()
+for(i in seq_along(x)){
+  y <- c(y, sum(div < x[i]))
+}
+
+par(mfrow=c(1,2),mar=c(4,4,4,2))
+barplot(sort(sparcity, decreasing = T)[1:50], las=2, cex.names=0.8, ylab="sparsicity", xaxt='n', ann=FALSE, xlab="variables")
+abline(h=0.1,col=4,lty=2)
+plot(x, y, pch=19, xlab ="percentage of most frequent value", ylab ="number of var with less uniform data")
+df <- busi4[,div <0.99]
+# saveRDS(df, "df_for_EDA.rds")
+```
+
+##Exploratory Data Analysis
+
+###What people say about wifi
+In this section, we look at the data generally to explore the posibility of answering our question about wifi. So we are looking at how many people are commenting on wifi along the years and what are they saying.
+
+```{r, echo=FALSE, results='hide', message=FALSE, fig.align = 'center', fig.width=7, fig.height=4, cache=TRUE}
+plotdata <- as.data.frame(readRDS("plotdata"))
+#png(file="1.png",width=2500,height=1700,res=350)
+qplot(rownames(plotdata), plotdata$carewifi, geom="bar",stat="identity", xlab="", ylab="percent of reviews mentioned wifi", fill=plotdata$nwifirev_time) + geom_text(label=plotdata$nwifirev_time, vjust=-0.5) + ylim(0, 0.006)
+#dev.off()
+
+stem_wifi_text<- readRDS("stem_wifi_text.rds")
+find_2_gram <- function(vec){
+  if(length(vec)<2){return("")}
+  v1 <- vec[1:length(vec)-2+1]
+  v2 <- vec[2:length(vec)]
+  g2<-paste(v1, v2)
+  g2
+}
+gram2<-list()
+for(i in seq(stem_wifi_text)){
+  if(length(stem_wifi_text[[i]])<2){}
+  gram2[[i]] <- find_2_gram(stem_wifi_text[[i]])
+}
+#build word could from input of a list of documents
+mywc <- function(doclist){
+  freqdf<-as.data.frame(table(unlist(doclist)),stringsAsFactors=F) 
+  wordcloud(freqdf$Var1, freqdf$Freq, max.words=50, colors=brewer.pal(8, "Dark2"))
+}
+```
+People are less and less caring about wifi since 2008 according to frequency of reviews mentioning "wifi", or "internet"
+
+```{r, echo=FALSE, fig.width=6, fig.height=6, fig.align = 'center', fig.show = "hold"}
+#png(file="2.png",width=2500,height=1700,res=350)
+mywc(stem_wifi_text)
+# #dev.off()
+# #png(file="3.png",width=2500,height=1700,res=350)
+mywc(gram2)
+#dev.off()
+```
+
+It is always straightforward to see wordcloud. The left one is 1-gram token and right one is 2-gram tokens.
+
+###City and category reduction
+Then we found the cities var contains too many values, and not distributed uniformly. So in order to increase the efficincy of regression, lower the number of dummy variables in the final model, we will group some of the citis into "others". 
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+df <- readRDS("df_for_EDA.rds")
+unique(df$city)
+# tapply()
+city<-names(sort(table(df$city), decreasing = T)[1:4])
+# we will leave first 5 cities and combine all left as "others"
+oricity <- as.character(df$city)
+for(i in 1:nrow(df)){
+  if(oricity[i] %in% city){next}
+  else{oricity[i]<-"others"}
+}
+df$city <- as.factor(oricity)
+df$attributes.wifi <- relevel(df$attributes.wifi, "no")
+```
+
+We still have too many variables specifying types of restuarants. Some of the types are rare, with less occurance, that would be of our less interest. So I want to cut the type of restuarants down to several majors types. The standard of maintainning certain types depends on occurance and also we want to cover almost all the business in list.
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+#saveRDS(df[,43:78], "categMatrix.rds")
+occr <- sort(apply(df[,43:78], 2, sum), decreasing = T)
+occr
+covr <- numeric()
+temp <- rep(0, nrow(df))
+for(i in 1:length(occr)){
+  temp <- temp + df[,names(occr)[i]]
+  covr <- c(covr, sum(temp!=0)/nrow(df))
+}
+```
+
+```{r echo = FALSE, fig.width=7, fig.height=5}
+#png(file="4.png",width=2500,height=1700,res=350)
+qplot(x=1:length(occr), y=covr, size=occr, colour=occr, geom="point", xlab="number of types", ylab="coverage of all observations") + geom_vline(xintercept = 13)
+#dev.off()
+
+df1 <- cbind(df[, 1:42], df[, names(occr)[1:13]])
+categ <- df[,43:78]
+```
+
+Based on this figuer, we will choose first 13 types which cover `r covr[13]` of all observations. And store full categories in categ data frame
+
+## Check the correlations
+Highly correlated predictor can cause problems, so lets check the correlations
+
+```{r echo = FALSE, fig.width=7, fig.height=6}
+corm <- cor(as.matrix(df1[,-c(1, 9, 10,12, 17)]))
+#saveRDS(corm, "corm.rds")
+#png(file="5.png",width=2500,height=1700,res=350)
+heatmap.2(corm, cexRow = 0.4, cexCol=0.4, density.info = "none")
+#dev.off()
+```
+
+This tell us:
+
+  1. stars which is from business table are highly correlated to average stars we want to analyze, if we include this in the model, we will get model with high R square but can provide no information about what people really like. So I will exclude this business star from our model
+  
+  2. two variables are almost the same, "review_count", and "nrev", they are talking about the same thing, so I will remove "review count" . Similarly, "nightlife" and "bars" overlap significantly, so remove "nightlife"
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+#remove "review_count", "stars", "Nightlife"
+df2 <- df1[, -c(2,3, 47)]
+#saveRDS(df2, "df2.rds")
+```
+Finally, lets look at some numeric variables distributions
+
+```{r, echo=FALSE, result = 'hide' , message=FALSE}
+# df2<-readRDS("df2.rds")
+#png(file="6.png",width=2500,height=1700,res=350)
+par(mfrow=c(2,2))
+par(mar=c(2,2,2,2))
+hist(df2$ave_star)
+hist(df2$ave_pos)
+hist(df2$ave_neg)
+hist(df2$ave_tok)
+#dev.off()
+hist(log(df2$nrev_wifi[df2$nrev_wifi!=0]))
+hist(df2$sentiment)
+```
+Only mild skewness were found and no transformation were applied. for number of reviews which strongly skewed to right, due to large number of 0s, even transformation will not help a lot. So we just dont do any transformation here.
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+# df2$ave_star <- 1.5^df2$ave_star
+# names(df2)[35] <- "exp_ave_star"
+# #df2$nrev_wifi[df2$nrev_wifi!=0] <- log(df2$nrev_wifi[df2$nrev_wifi!=0])
+# names(df2)[39] <- "log_nrev_wifi"
+```
+
+# Exploratory modeling
+
+## full model
+
+Let's throw all variables into the regular linear model and see how this full model perform and compare it to weighted model.
+
+```{r, echo=FALSE, message=FALSE, cache=TRUE}
+lmsum <- function(fit){
+  return(c("Rsqr"=summary(fit)$adj.r.squared, "sigma" = sigmaHat(fit),"vif" = sort(vif(fit)[,1], decreasing=T)[1:5], fit$coefficients["wififree"], fit$coefficients["wifipaid"]))
+}
+
+names(df2) <- gsub("attributes.", "", names(df2))
+f <- lm(ave_star~., data=df2)
+summary(f)
+summarym <- lmsum(f)
+```
+R square of over 62% were achieved and this is impressing in this case with all the variables I used. But the because we are regressing on the business which contain average data from different number of reviews. So let's compare to weighted lm model: weighted model
+
+```{r echo=FALSE,cache=TRUE, message=FALSE}
+wf <- lm(ave_star~., data=df2, weights = sqrt(nrev))
+summarym <- rbind(summarym, lmsum(wf))
+kable(summarym)
+```
+The first row is un-weighted model and 2nd row is weighted model
+From here, we know we need to use weighted model because weighted model give us much higher R square. 
+
+In both models we see four variables with pretty high vif indicating multicolinearity. To deal with this, first let's try to center numeric vaiables to see if this helps.
+
+```{r, echo=FALSE, cache=TRUE, message=FALSE}
+df2c <- df2
+df2c[,35:40] <- scale(df2c[,35:40])
+fc <- lm(ave_star~., data=df2c)
+wfc <- lm(ave_star~., data=df2c, weights = sqrt(nrev))
+summarym <- rbind(summarym, lmsum(fc), lmsum(wfc))
+kable(summarym)
+```
+3rd row is centered un-weighted full model, 4th row is centered and weighted full model.
+
+Above all, 
+
+1. Center numeric data is barely improving anything.
+
+2. Weighted model significantly increase adjusted R square but also increase the vif.
+
+Considering even without weights, the vif of the top 4 are so high that we have to remove one or several. So we will stick to weighted and non-centered model from now on.
+
+To reduce the vif, We can either remove variable "sentiment" or both "ave pos" and "ave neg". Let's try both
+
+```{r, echo=FALSE, message=FALSE}
+df3 <- df2[,-40]
+f3 <- lm(ave_star~., data=df3, weights= sqrt(nrev))
+# lmsum(f3)
+df4 <- df2[,-c(36,37)]
+f4 <- lm(ave_star~., data=df4, weights= sqrt(nrev))
+# lmsum(f4)
+summarym <- rbind(summarym, lmsum(f3), lmsum(f4))
+rownames(summarym) <- c("original", "weighted", "centered", "centered_weighted", "-sentiment", "-pos and -neg")
+# saveRDS(summarym, "summarym.rds")
+# write.csv(summarym, "summarym.csv")
+kable(summarym)
+```
+
+From above comparison we find when we remove  "ave pos" and "ave neg", full model has higher R squared and smaller maximum vif. So we will do so from now on. 
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+names(df4) <- gsub("[ -]", "_", names(df4))
+```
+
+## Do we have interactions here?
+We have lots of categorical data, so a natural question to ask is do any of those interact. We start off with checking all possible interactions and followed by checking interaction with only wifi variable.
+
+```{r, echo=FALSE, message=FALSE, cache=TRUE, fig.width=7, fig.height=6}
+#Interaction among all possible variables
+# gf <- lm(ave_star~.*., data=df4, weights= sqrt(nrev))
+coplot(ave_star~sentiment|ave_tok, data=df4)
+```
+
+```{r, echo=FALSE, message=FALSE, cache=TRUE, fig.width=7, fig.height=6}
+# gfwifi <- lm(ave_star~wifi*., data=df4, weights = sqrt(nrev))
+coplot(ave_star~nrev_wifi|as.factor(wifi), data=df4)
+#dev.off()
+#coplot(exp_ave_star~log_nrev_wifi|nrev, data=df4)
+nrev_wifi_p <- df4$nrev_wifi/df4$nrev
+#coplot(exp_ave_star~nrev_wifi_p|as.factor(attributes.wifi), data=df4)
+```
+We do find a little interaction between 
+1. number of reviews and number of reviews talking about wifi with wifi status
+2. ave_tok and sentiment
+So we will include those 3 interacting term in my model by add interacting variables in the dataset.
+
+```{r echo=FALSE, results='hide', message=FALSE}
+df5 <- df4
+df5$int_tok_sent <- df5$ave_tok * df5$sentiment
+df5$int_n_nowifi <- df5$nrev_wifi * (df5$wifi=="no")
+df5$int_n_freewifi <- df5$nrev_wifi * (df5$wifi=="free")
+df5$int_n_paidwifi <- df5$nrev_wifi * (df5$wifi=="paid")
+# to maintain low correlation, remove original log_nrev_wifi col
+df5 <- df5[,-37]
+f5 <- lm(ave_star~., weights=sqrt(nrev), data=df5)
+# lmsum(f5)
+summarym <- rbind(summarym, lmsum(f5))
+colnames(summarym)[3:7] <-c("vif") 
+rownames(summarym)[7] <- "+interaction1"
+#remove "int_tok_sent"
+df6<- df5[,-50]
+f6<- lm(ave_star~., weights=sqrt(nrev), data=df6)
+# lmsum(f6)
+summarym <- rbind(summarym, lmsum(f6))
+rownames(summarym)[8] <- "+interaction2"
+# saveRDS(df6, "df6.rds")
+```
+Comparing all full models
+
+```{r}
+kable(summarym)
+```
+
+According to all the full models we have tried above, the last one give us most feasible results to proceed to variable selection. The last one is:
+  * weighted
+  * un-centered
+  * without variable positive words number
+  * without variable negative words number
+  * with interaction between number of review mentioning 'wifi' and wifi
+By the way, outliers checked and no significant outliers found.
+
+## Model selection
+After we have our full model, several methods are used to choose best parsimonious model by lasso
+
+```{r, echo=FALSE, message=FALSE, fig_width= 10, fig_height= 5}
+#Construct design matrix
+xx <- df6[,-35]
+xx[,7]  <- relevel(xx[,7], "none")
+# Cast multilevel variable into design matrix with dummy variable
+m1 <- model.matrix(~xx[,1]-1)[,-1]
+m7 <- model.matrix(~xx[,7]-1)[,-1]
+m8 <- model.matrix(~xx[,8]-1)[,-1]
+m10 <- model.matrix(~xx[,10]-1)[,-1]
+m15 <- model.matrix(~xx[,15]-1)[,-1]
+xx2 <- cbind(m1, xx[,2:6], m7, m8, xx[,9], m10, xx[,11:14], m15, xx[,16:ncol(xx)])
+colnames(xx2)[15] <- "Has_TV"
+colnames(xx2) <- gsub("xx\\[, [0-9]+\\]", "", colnames(xx2))
+colnames(xx2) <- gsub("attributes.", "", colnames(xx2))
+for(i in ncol(xx2)){
+  xx2[,i] <- xx2[,i] * 1
+}
+xx2 <- as.matrix(xx2)
+yy <- df6[,35]
+
+las <- glmnet(xx2, yy, weights = sqrt(df6$nrev))
+par(mfrow=c(1,2))
+# par(mar=c(5,5,4,2))
+plot(las)
+cvlas <- cv.glmnet(xx2, yy, weights = sqrt(df6$nrev), nfolds= 10)
+plot(cvlas)
+coef(las, cvlas$lambda.1se)
+```
+This tell us:
+To explain number of stars, variable sentiment almost explained all of it. And all other variables combined have only marginal effects after we include sentiment in the model. And also sentiment of customers reflect overall experience to that restuarant, which means all the attributes we gave them are likely actually contributing to sentiment and then to stars.
+Our focus is about wifi access. So let's leave R square aside and try model without sentiment.
+
+```{r, echo=FALSE, results='hide', message=FALSE, fig_width= 10, fig_height= 5}
+xx3 <- xx2[,-44]
+las3 <- glmnet(xx3, yy, weights = sqrt(df6$nrev))
+par(mfrow=c(1,2))
+plot(las3)
+cvlas3 <- cv.glmnet(xx3, yy, weights = sqrt(df6$nrev), nfolds= 10)
+cvlas3$lambda.min
+plot(cvlas3)
+coef(las3, cvlas3$lambda.1se)
+
+coef3<-coef(cvlas3, s = "lambda.1se")
+paranames <- c("intercept", colnames(xx3))[as.matrix(coef3) != 0]
+coef3 <- as.numeric(coef3)[as.matrix(coef3) != 0]
+ord <- order(coef3, decreasing=T)
+coef3 <- coef3[ord]
+paranames <- paranames[ord]
+#Print coef
+t(data.frame("variables"=paranames, "values"=coef3))
+#Get rid of intercetp 
+coef3 <- coef3[-1]
+paranames2 <- paranames[-1]
+coefgp <- as.factor((coef3>0) * 1 + (coef3<0)*2)
+
+#saveRDS(data.frame("Chosen_Var"=factor(paranames2, levels=paranames2), "Fit_Value"=coef3), "coefplotdata.rds")
+#Plot coeficients
+```
+
+```{r, echo=FALSE, fig_width= 10, fig_height= 10}
+suppressWarnings(ggplot(data=data.frame("Chosen_Var"=factor(paranames2, levels=paranames2), "Fit_Value"=coef3), aes(Chosen_Var, weight=Fit_Value)) +geom_bar(aes(fill=coefgp)) + labs(title = "Coeficients of Lasso Regression Model Fit", x="Words/Variables/Features", y="Coefficients") + theme(axis.ticks = element_blank(), axis.text.x = element_blank()) + geom_text(aes(y=c(rep(-0.5,sum(coef3 >0)), rep(0.5,sum(coef3 <0))), label=paranames2, angle=-90), size=2.6) + ylim(-1.7, 1.5))
+```
+
+#Results 1:
+
+In this data set, variable sentiment is too good to explain the ratings been given. And this sentiment is also related to all other variables to a certain extend. So all other coeficients become not so significant. If we exclude sentiment and just analyze the contributions from other attributes. R square dropped dramatically but there are still over 20% been accounted. 
+
+When we include sentiment, coefficient of wifi free is always below zero. Which can be explained by multicolinearity. When sentiment excluded, the coefficient of wifi free become positive and wifi paid remaind negative. And both are significant. 
+
+Unfortunately, we can not say anything about wifi so far, because the coeficient is too close to zero and it changes from negative to positive between different models. Even it is significant in our last model, but the model only explains 20% variance in ratings and the data size is not small. So we cannot make any conclusion about wifi's impact on customers' experience.
+Interestingly, paid wifi always has negative coeficient and it is always more significant comparing to free wifi. So we can make conclusion that paid wifi is hurting people's feeling.
+
+In next part, I looked into the data more deeply to find out why we saw negative wifi coeficients in previous analysis because I believe that free stuff never hurts.
+
+# PartII, Why free wifi is hurting people?
+
+In this part, I am trying to use small portion of the data whose review contains wifi or internet, that is using the data frame I made "wifidf", to do regression on average stars the business got. I believe people's words contains much more information than just a dummy variable of 0 and 1s. Also, by using this model, we are assuming we can separate people's feeling about wifi and all other things by exploring the review text. In this way, sentiment variable might not be associate with people's feeling about wifi anymore. Thus the coeficients here might be more reliable to make conclusions about if people like or hate wifi.
+
+## read in data frame
+```{r, echo=FALSE, results='hide', message=FALSE, fig_width= 10, fig_height= 5}
+wifidf <- readRDS("wifidf.rds")
+stem_wifi_text <- readRDS("stem_wifi_text.rds")
+```
+## Text mining
+
+Here we try to seperate people's words about wifi and all other stuff. And extract the sentiments.
+
+```{r, echo=FALSE, results='hide', message=FALSE, fig_width= 5, fig_height= 3}
+positive_words <- readLines("http://www.idiap.ch/~apbelis/hlt-course/positive-words.txt")[-c(1:35)]
+negtive_words <- readLines("http://r.chrisrooney.co.uk/presentation/data/negative-words.txt")[-c(1:35)]
+#Function to count positive words
+pos_count <- function(char, pos = c(positive_words, "plus")){
+  sum(tolower(strsplit(char, split=" ")[[1]]) %in% pos)
+}
+#Function to count negative words
+neg_count <- function(char, neg = c(negtive_words)){
+  sum(tolower(strsplit(char, split=" ")[[1]]) %in% neg)
+}
+
+for(i in 1:length(stem_wifi_text)){
+  wifidf$npos[i] <- pos_count(paste(stem_wifi_text[[i]], collapse = " "))
+  wifidf$nneg[i] <- neg_count(paste(stem_wifi_text[[i]], collapse = " "))
+  wifidf$ntok[i] <- length(stem_wifi_text[[i]])
+}
+
+wifidf$sentw <- (wifidf$npos - wifidf$nneg)/wifidf$ntok
+hist(wifidf$sentw, breaks = 100)
+```
+
+Histgram told us most people are happy when they were talking about wifi
+
+```{r, echo=FALSE, results='hide', message=FALSE, fig_width= 8, fig_height= 6}
+ggplot(wifidf, aes(attributes.wifi, sentw))+geom_boxplot(fill="light blue") + labs(x="WIFI status provided by yelp", y="sentiment about wifi")
+# nosent <- filter(wifidf[,-5], sentw==0)
+# nosent$wifi_sen[1:10]
+# What are people talking about in weird region
+```
+
+In this boxplot, we found some interesting things
+  * why people are complaining when there is free wifi?
+  * why people are happy when there is no wifi?
+
+Let's take a look at what people say then
+
+### What people say in restaurants with "free wifi"?
+```{r, echo=FALSE}
+filter(wifidf[,-5], sentw < -0.3, attributes.wifi == "free")$wifi_sen
+```
+
+### What people say in restaurants with "no wifi"?
+```{r, echo=FALSE}
+filter(wifidf[,-5], sentw > 0.5, attributes.wifi == "no")$wifi_sen
+```
+What about paid wifi? Let's check the word clouds
+
+row1: good comments
+
+row2: bad comments
+
+column1: free wifi
+
+column2: paid wifi
+
+column3: no wifi
+
+```{r,echo=FALSE, results='hide', message=FALSE}
+#word cloud
+mywc <- function(doclist){
+  freqdf<-as.data.frame(table(unlist(doclist)),stringsAsFactors=F) 
+  wordcloud(freqdf$Var1, freqdf$Freq, max.words=50, colors=brewer.pal(8, "Dark2"))
+}
+
+freep <- filter(wifidf[,-5], sentw > 0, attributes.wifi == "free")$wifi_sen
+paidp <- filter(wifidf[,-5], sentw > 0, attributes.wifi == "paid")$wifi_sen
+nop <- filter(wifidf[,-5], sentw > 0, attributes.wifi == "no")$wifi_sen
+freen <- filter(wifidf[,-5], sentw < 0, attributes.wifi == "free")$wifi_sen
+paidn <- filter(wifidf[,-5], sentw < 0, attributes.wifi == "paid")$wifi_sen
+non <- filter(wifidf[,-5], sentw < 0, attributes.wifi == "no")$wifi_sen
+
+wordcloud(freep, max.words = 50, colors = brewer.pal(8,"Dark2"), min.freq = 0)
+wordcloud(freen, max.words = 50, colors = brewer.pal(8,"Dark2"), min.freq = 0)
+wordcloud(paidp, max.words = 50, colors = brewer.pal(8,"Dark2"), min.freq = 0)
+wordcloud(paidn, max.words = 50, colors = brewer.pal(8,"Dark2"), min.freq = 0)
+wordcloud(nop, max.words = 50, colors = brewer.pal(8,"Dark2"), min.freq = 0)
+wordcloud(non, max.words = 50, colors = brewer.pal(8,"Dark2"), min.freq = 0)
+
+
+```
+Now things become interesting and also annoying. We can understand that people would complaining the free wifi when the quality of wifi connection is poor. But why people are telling there were free wifi even the yelp's data told us there were no wifi? So we believe that the data about wifi of different business is outdated or wrong. 
+
+However, out of over 800000 reviews, only 3555 reviews mentioned wifi, so there is no way to check the ratio of mistakes in the wifi data. What we can do is just stay with this 3555 reviews and try regression on them to see if there is any conclusion we can reach to answer our primary question: "should restaurants' owner provide wifi to increasing customers' experience"
+
+Our strategy is definitive, the original wifi variable is not accurate, and also, the connection quality matters a lot. So we will use sentiment of review about wifi as our target variable to see:
+
+"When people are happy about the wifi, are they happy with the restaurants too?"
+
+If yes, that means a good wifi can help improve customers' experience
+If no, that means wifi really dosen't matter
+
+## Modeling
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+wifidf4<-readRDS("wifidf4.rds")
+wifidf5 <- wifidf4[, -c(1,2,4,5,40,41)]
+#Maintain only complete cases
+wifidf5 <- wifidf5[complete.cases(wifidf5),]
+```
+### Modeling on individual reviews
+
+```{r, echo=FALSE, message=FALSE, cache=TRUE}
+#Remove highly correlated variables
+wifidf6 <- wifidf5[,-c(36:41)]
+f <- lm(stars~., data=wifidf6)
+# summary(f)
+# Model selection by backwards
+fs <- step (f, direction="backward", trace = FALSE)
+summary(f)
+#confidence interval
+confint(fs, "sentw")
+```
+
+###Modeling by weighted regression on only business
+
+```{r, echo=FALSE, message=FALSE, cache=TRUE}
+wifidf7 <- mutate(group_by(wifidf4, business_id), ave_star = mean(stars), ave_sent = mean(sentiment), ave_sentw = mean(sentw), nrev = n())
+
+wifidf7 <- wifidf7[,-c(2,3,4,5,40:49)]
+wifidf7 <- wifidf7[complete.cases(wifidf7),]
+# unibusi_id<- unique(wifidf7$business_id)
+# xdf <- data.frame(business_id=unibusi_id, extra = rep(0, length(unibusi_id)))
+# wifidf8 <- merge(xdf, wifidf7[,1:2])
+wifidf8 <- wifidf7[!duplicated(wifidf7), ]
+wifidf8 <- wifidf8[, -1]
+
+f2 <- lm(ave_star~., data=wifidf8, weights = sqrt(nrev))
+# summary(f2)
+f21 <- lm(ave_star~ave_sent + ave_sentw, data=wifidf8, weights = sqrt(nrev))
+# summary(f21)
+f22 <- step(f21, scope = list(lower=f21, upper=f2), direction="forward", steps=50, trace = FALSE)
+summary(f22)
+#confidence interval
+confint(f22, "ave_sentw")
+```
+
+#Conclusion 2:
+Wifi do help improve rating on different restaurants. But it really depends on the quality of the wifi. In this part, regression are applied and sentiment of comment about wifi are used as our indicator variable. The coeficient of this variable stay well above 0 and has very low p value. Which simply means the happier the people about wifi, the higher rating they tend to give to the restaurants. 
+
+However, this analysis could be biased, because we only use the 3555 reviews containing "wifi" or "internet". Which means the reviewers might value more on wifi access than general public. Their might be a way to assess this bias by using user data set provieded by yelp. Also it would be interensting to check distribution of type of restaurants in the 3555 reviews comparing to all business we used before. This might shed some light on what kind of restaurants might need wifi more than other.
+
+Above all, we have following conclusion
+The positive affects on ratings are as followed
+Good quality free wifi > no wifi > paid wifi or low quality wifi
+So, if you are going to have restaurant, provide only free and good quality wifi or provide nothing!
+
+Thanks for reading.
